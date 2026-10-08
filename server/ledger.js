@@ -35,15 +35,17 @@ export async function customerLedger(asOf = today()) {
   const custs = await db.prepare('SELECT * FROM customers WHERE active=1 ORDER BY name').all();
   const sales = await db.prepare("SELECT customer_id, date, due_date, total FROM sales WHERE type='credit' AND status='active' AND customer_id IS NOT NULL").all();
   const pays = await db.prepare(`SELECT customer_id, SUM(receipt) paid, MAX(date) last FROM cashbook WHERE category=? AND customer_id IS NOT NULL GROUP BY customer_id`).all(CAT_CUSTOMER_PAYMENT);
+  const rets = await db.prepare(`SELECT customer_id, SUM(total) returned FROM sale_returns WHERE status='active' AND refund_type='credit' AND customer_id IS NOT NULL GROUP BY customer_id`).all();
   return custs.map((c) => {
     const inv = sales.filter((s) => s.customer_id === c.id);
     const credit = r2(inv.reduce((s, i) => s + i.total, 0));
     const p = pays.find((x) => x.customer_id === c.id);
-    const paid = r2(p?.paid ?? 0), balance = r2(c.opening_balance + credit - paid);
+    const returned = r2(rets.find((x) => x.customer_id === c.id)?.returned ?? 0);
+    const paid = r2(p?.paid ?? 0), balance = r2(c.opening_balance + credit - paid - returned);
     const openInv = c.opening_balance ? [{ date: '1900-01-01', due_date: '1900-01-01', total: c.opening_balance }, ...inv] : inv;
     const ag = ageing(openInv, balance, asOf);
     const status = balance < 0 ? 'Advance' : balance === 0 ? 'Settled' : ag.overdue > 0 ? 'Overdue' : 'Current';
-    return { ...c, credit, paid, balance, last_payment: p?.last ?? null, ...ag, status,
+    return { ...c, credit, paid, returned, balance, last_payment: p?.last ?? null, ...ag, status,
       over_limit: c.credit_limit > 0 && balance > c.credit_limit, available: r2(c.credit_limit - balance) };
   });
 }
@@ -98,6 +100,9 @@ export async function yearReport(year = Number(getSetting('financial_year', new 
     }
   }
   for (const x of cs) { revCredit[x.m - 1] += x.s; outCredit[x.m - 1] += x.v; }
+  const crn = await db.prepare(`SELECT CAST(substr(date,6,2) AS INTEGER) m, SUM(subtotal) s, SUM(vat) v FROM sale_returns
+    WHERE status='active' AND refund_type='credit' AND substr(date,1,4)=? GROUP BY m`).all(String(year));
+  for (const x of crn) { revRet[x.m - 1] += x.s; outRet[x.m - 1] += x.v; }
   for (const x of cp) { cogsCredit[x.m - 1] += x.s; inCredit[x.m - 1] += x.v; }
 
   const open = Number(getSetting('opening_cash', 0)) + Number(getSetting('opening_bank', 0));
@@ -150,4 +155,63 @@ export async function dashboard() {
     overdueSuppliers: sup.filter((s) => s.overdue > 0).sort((a, b) => b.overdue - a.overdue).slice(0, 6),
     lowStock: low, topCustomers: top, recent,
   };
+}
+
+
+// ---------- accrual profit & loss: revenue when invoiced, cost of what was actually sold ----------
+export async function accrualReport(year = Number(getSetting('financial_year', new Date().getFullYear()))) {
+  const vr = vatRate(), y = String(year);
+  const base = await yearReport(year);
+  const rev = zero(), ret = zero(), cogs = zero(), retCost = zero(), covered = zero(), invoiced = zero();
+  const byMonth = async (sql, ...p) => (await db.prepare(sql).all(...p));
+  for (const x of await byMonth(`SELECT CAST(substr(date,6,2) AS INTEGER) m, SUM(subtotal) s FROM sales WHERE status='active' AND substr(date,1,4)=? GROUP BY m`, y)) { rev[x.m - 1] += x.s; invoiced[x.m - 1] += x.s; }
+  for (const x of await byMonth(`SELECT CAST(substr(date,6,2) AS INTEGER) m, SUM(receipt) s FROM cashbook WHERE category=? AND sale_id IS NULL AND substr(date,1,4)=? GROUP BY m`, CAT_SALES, y)) rev[x.m - 1] += x.s / (1 + vr);
+  for (const x of await byMonth(`SELECT CAST(substr(date,6,2) AS INTEGER) m, SUM(subtotal) s FROM sale_returns WHERE status='active' AND substr(date,1,4)=? GROUP BY m`, y)) ret[x.m - 1] += x.s;
+  for (const x of await byMonth(`SELECT CAST(substr(date,6,2) AS INTEGER) m, SUM(payment) s FROM cashbook WHERE category=? AND return_id IS NULL AND substr(date,1,4)=? GROUP BY m`, CAT_RETURN, y)) ret[x.m - 1] += x.s / (1 + vr);
+  for (const x of await byMonth(`SELECT CAST(substr(s.date,6,2) AS INTEGER) m, SUM(i.qty*i.unit_cost) c, SUM(CASE WHEN i.unit_cost>0 THEN i.amount ELSE 0 END) cv
+      FROM sale_items i JOIN sales s ON s.id=i.sale_id WHERE s.status='active' AND substr(s.date,1,4)=? GROUP BY m`, y)) { cogs[x.m - 1] += x.c; covered[x.m - 1] += x.cv; }
+  for (const x of await byMonth(`SELECT CAST(substr(r.date,6,2) AS INTEGER) m, SUM(i.qty*i.unit_cost) c FROM sale_return_items i JOIN sale_returns r ON r.id=i.return_id WHERE r.status='active' AND substr(r.date,1,4)=? GROUP BY m`, y)) retCost[x.m - 1] += x.c;
+
+  const netRev = rev.map((v, i) => v - ret[i]), netCogs = cogs.map((v, i) => v - retCost[i]);
+  const gross = netRev.map((v, i) => v - netCogs[i]);
+  const other = base.pnl.other, expenses = base.pnl.expenses, totalExp = base.pnl.totalExpenses;
+  const net = gross.map((v, i) => v + other[i] - totalExp[i]);
+  const R = (a) => a.map(r2);
+  const sum = (a) => r2(a.reduce((s, v) => s + v, 0));
+
+  const prod = new Map();
+  const add = (name, q, rv, c) => { const o = prod.get(name) ?? { name, qty: 0, revenue: 0, cost: 0 }; o.qty += q; o.revenue += rv; o.cost += c; prod.set(name, o); };
+  for (const x of await byMonth(`SELECT COALESCE(p.name, i.description) name, SUM(i.qty) q, SUM(i.amount) rv, SUM(i.qty*i.unit_cost) c FROM sale_items i JOIN sales s ON s.id=i.sale_id
+      LEFT JOIN products p ON p.id=i.product_id WHERE s.status='active' AND substr(s.date,1,4)=? GROUP BY 1`, y)) add(x.name, x.q, x.rv, x.c);
+  for (const x of await byMonth(`SELECT COALESCE(p.name, i.description) name, SUM(i.qty) q, SUM(i.amount) rv, SUM(i.qty*i.unit_cost) c FROM sale_return_items i JOIN sale_returns r ON r.id=i.return_id
+      LEFT JOIN products p ON p.id=i.product_id WHERE r.status='active' AND substr(r.date,1,4)=? GROUP BY 1`, y)) add(x.name, -x.q, -x.rv, -x.c);
+  const cust = new Map();
+  for (const x of await byMonth(`SELECT COALESCE(c.name,'Walk-in / no customer') name, SUM(i.amount) rv, SUM(i.qty*i.unit_cost) c FROM sale_items i JOIN sales s ON s.id=i.sale_id
+      LEFT JOIN customers c ON c.id=s.customer_id WHERE s.status='active' AND substr(s.date,1,4)=? GROUP BY 1`, y)) cust.set(x.name, { name: x.name, revenue: x.rv, cost: x.c });
+  const tidy = (m) => [...m.values()].map((o) => ({ ...o, qty: o.qty === undefined ? undefined : r2(o.qty), revenue: r2(o.revenue), cost: r2(o.cost), profit: r2(o.revenue - o.cost), margin: o.cost > 0 && o.revenue ? r2(((o.revenue - o.cost) / o.revenue) * 100) : null }))
+    .sort((a, b) => b.revenue - a.revenue);
+
+  const coverage = sum(invoiced) ? r2((sum(covered) / sum(invoiced)) * 100) : null;
+  return { year, months: base.months, revenue: R(rev), returns: R(ret), netRevenue: R(netRev), cogs: R(netCogs), gross: R(gross), other: R(other),
+    expenses, totalExpenses: R(totalExp), net: R(net), costCoverage: coverage,
+    totals: { netRevenue: sum(netRev), cogs: sum(netCogs), gross: sum(gross), net: sum(net) }, byProduct: tidy(prod), byCustomer: tidy(cust) };
+}
+
+// ---------- customer statement ----------
+export async function customerStatement(id, from = '', to = '') {
+  const c = (await customerLedger(to || undefined)).find((x) => x.id === id);
+  if (!c) return null;
+  const tx = [];
+  for (const s of await db.prepare("SELECT date,inv_no ref,total FROM sales WHERE customer_id=? AND type='credit' AND status='active'").all(id)) tx.push({ date: s.date, kind: 'Invoice', ref: s.ref, debit: s.total, credit: 0 });
+  for (const p of await db.prepare('SELECT date,ref,receipt FROM cashbook WHERE customer_id=? AND category=?').all(id, CAT_CUSTOMER_PAYMENT)) tx.push({ date: p.date, kind: 'Payment', ref: p.ref || '', debit: 0, credit: p.receipt });
+  for (const r of await db.prepare("SELECT date,ret_no ref,total FROM sale_returns WHERE customer_id=? AND status='active' AND refund_type='credit'").all(id)) tx.push({ date: r.date, kind: 'Credit note', ref: r.ref, debit: 0, credit: r.total });
+  tx.sort((a, b) => a.date.localeCompare(b.date) || (a.kind === 'Invoice' ? -1 : 1));
+  let bal = c.opening_balance;
+  const before = tx.filter((t) => from && t.date < from);
+  for (const t of before) bal += t.debit - t.credit;
+  const opening = r2(bal);
+  const rows = [];
+  for (const t of tx.filter((t) => (!from || t.date >= from) && (!to || t.date <= to))) { bal += t.debit - t.credit; rows.push({ ...t, balance: r2(bal) }); }
+  return { customer: { id: c.id, name: c.name, phone: c.phone, vat_no: c.vat_no, credit_limit: c.credit_limit }, from, to, opening, rows, closing: r2(bal),
+    ageing: { current: c.b0_30, d31_60: c.b31_60, d61_90: c.b61_90, over90: c.b90, overdue: c.overdue, balance: c.balance } };
 }

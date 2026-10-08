@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node server.js",
     "seed": "node server/seed.js",
-    "test": "node --test test/api.test.js test/setup.test.js"
+    "test": "node --test test/api.test.js test/setup.test.js test/features.test.js"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",

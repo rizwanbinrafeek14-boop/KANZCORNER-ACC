@@ -2,6 +2,10 @@ import express from 'express';
 import QRCode from 'qrcode';
 import { db, tx, r2, claimOnce, getSetting, setSetting, allSettings, nextInvoiceNumber, audit, CATEGORIES, MODES, CAT_CUSTOMER_PAYMENT, CAT_SUPPLIER_PAYMENT, CAT_SALES, CAT_PURCHASE } from './db.js';
 import { hashPassword, verifyPassword, makeToken, readToken, can, TTL_MS, RENEW_BELOW_MS, tokenExpiry } from './auth.js';
+import { HttpError, bad, iso, num, date, str, addDays, vatRate, modeOk, need, cashEntry } from './util.js';
+import { registerFeatures } from './features.js';
+import { saveSale, parseSale } from './salesCore.js';
+import { savePurchase } from './purchasesCore.js';
 import { cashPosition, customerLedger, supplierLedger, yearReport, dashboard } from './ledger.js';
 
 export const app = express();
@@ -16,19 +20,6 @@ app.use((req, res, next) => {
   next();
 });
 
-class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
-const bad = (msg) => new HttpError(400, msg);
-const iso = /^\d{4}-\d{2}-\d{2}$/;
-const num = (v, name, { min = 0, allowZero = true } = {}) => {
-  const n = Number(v);
-  if (!Number.isFinite(n) || n < min || (!allowZero && n === 0)) throw bad(`${name} must be a valid number`);
-  return n;
-};
-const date = (v, name = 'Date') => { if (!iso.test(v ?? '') || Number.isNaN(Date.parse(v))) throw bad(`${name} must be a valid date (YYYY-MM-DD)`); return v; };
-const str = (v, max = 200) => (v == null || v === '' ? null : String(v).trim().slice(0, max));
-const addDays = (d, n) => { const x = new Date(d + 'T00:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
-const vatRate = () => Number(getSetting('vat_rate', '0.15'));
-
 // ---------- cookies / auth ----------
 const cookies = (req) => Object.fromEntries((req.headers.cookie || '').split(';').map((c) => c.trim().split('=')).filter((p) => p[0]).map(([k, ...v]) => [k, v.join('=')]));
 app.use('/api', async (req, res, next) => {
@@ -41,12 +32,6 @@ app.use('/api', async (req, res, next) => {
     res.cookie('kanz_session', makeToken(req.user.id), { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: TTL_MS });
   next();
 });
-const need = (perm) => (req, res, next) => {
-  if (!req.user) return next(new HttpError(401, 'Please sign in'));
-  if (!can(req.user, perm)) return next(new HttpError(403, 'Your role does not allow this'));
-  next();
-};
-
 const attempts = new Map();
 app.post('/api/auth/login', async (req, res) => {
   const { username = '', password = '' } = req.body ?? {};
@@ -162,14 +147,6 @@ app.post('/api/customers', need('parties'), saveParty('customers', true));
 app.put('/api/customers/:id', need('parties'), saveParty('customers', true));
 app.post('/api/customers/:id/archive', need('parties'), async (req, res) => { await db.prepare('UPDATE customers SET active=0 WHERE id=?').run(req.params.id); await audit(req.user, 'archive', 'customers', Number(req.params.id)); res.json({ ok: true }); });
 
-async function cashEntry(o, user) {
-  const r = await db.prepare(`INSERT INTO cashbook(date,ref,description,party,category,mode,receipt,payment,notes,customer_id,supplier_id,sale_id,purchase_id,created_by)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(o.date, o.ref ?? null, o.description ?? null, o.party ?? null, o.category, o.mode ?? 'Cash',
-    r2(o.receipt ?? 0), r2(o.payment ?? 0), o.notes ?? null, o.customer_id ?? null, o.supplier_id ?? null, o.sale_id ?? null, o.purchase_id ?? null, user?.id ?? null);
-  return Number(r.lastInsertRowid);
-}
-const modeOk = (m) => { if (!MODES.includes(m)) throw bad('Choose a valid payment mode'); return m; };
-
 app.post('/api/customers/:id/payment', need('cashbook_add'), async (req, res) => {
   const c = await db.prepare('SELECT * FROM customers WHERE id=?').get(req.params.id);
   if (!c) throw new HttpError(404, 'Customer not found');
@@ -260,54 +237,26 @@ app.get('/api/sales', need('view'), async (req, res) => {
 app.get('/api/sales/:id', need('view'), async (req, res) => {
   const s = await db.prepare('SELECT s.*, c.name customer FROM sales s LEFT JOIN customers c ON c.id=s.customer_id WHERE s.id=?').get(req.params.id);
   if (!s) throw new HttpError(404, 'Invoice not found');
-  res.json({ ...s, items: await db.prepare('SELECT * FROM sale_items WHERE sale_id=?').all(s.id) });
+  const items = await db.prepare(`SELECT si.*, COALESCE((SELECT SUM(ri.qty) FROM sale_return_items ri JOIN sale_returns r ON r.id=ri.return_id WHERE ri.sale_item_id=si.id AND r.status='active'),0) returned
+    FROM sale_items si WHERE si.sale_id=? ORDER BY si.id`).all(s.id);
+  res.json({ ...s, items });
 });
 app.post('/api/sales', need('sales'), async (req, res) => {
-  const b = req.body ?? {};
-  const type = b.type === 'credit' ? 'credit' : 'cash';
-  const d = date(b.date);
-  if (!Array.isArray(b.items) || !b.items.length) throw bad('Add at least one item');
-  const items = await Promise.all(b.items.map(async (i, n) => {
-    const qty = num(i.qty, `Item ${n + 1} quantity`, { allowZero: false }), price = num(i.unit_price, `Item ${n + 1} price`);
-    let p = null;
-    if (i.product_id) { p = await db.prepare('SELECT * FROM products WHERE id=? AND active=1').get(i.product_id); if (!p) throw bad(`Item ${n + 1}: product not found`); }
-    const description = str(i.description, 200) ?? p?.name;
-    if (!description) throw bad(`Item ${n + 1} needs a description or product`);
-    return { p, description, qty, price, amount: r2(qty * price) };
-  }));
-  const subtotal = r2(items.reduce((s, i) => s + i.amount, 0)), vat = r2(subtotal * vatRate()), total = r2(subtotal + vat);
-  let cust = null;
-  if (b.customer_id) { cust = (await customerLedger()).find((c) => c.id === Number(b.customer_id)); if (!cust) throw bad('Customer not found'); }
-  if (type === 'credit') {
-    if (!cust) throw bad('Choose a customer for a credit sale');
-    if (cust.credit_limit > 0 && cust.balance + total > cust.credit_limit && !(b.override_limit && can(req.user, 'parties')))
-      throw new HttpError(409, `Credit limit exceeded: ${cust.name} owes ${cust.balance.toFixed(2)} of ${cust.credit_limit.toFixed(2)}. An owner/accountant can override.`);
-  }
-  if (!b.allow_negative) for (const i of items) if (i.p && i.p.stock < i.qty) throw new HttpError(409, `Not enough stock for "${i.p.name}" (have ${i.p.stock}, need ${i.qty}).`);
-  const days = type === 'credit' ? Math.round(num(b.credit_days ?? getSetting('default_credit_days', '30'), 'Credit days')) : null;
-  const mode = type === 'cash' ? modeOk(b.payment_mode ?? 'Cash') : null;
-  const id = await tx(async () => {
-    const invNo = `INV-${await nextInvoiceNumber()}`;
-    const sr = await db.prepare(`INSERT INTO sales(inv_no,date,customer_id,type,payment_mode,subtotal,vat,total,credit_days,due_date,description,notes,created_by)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(invNo, d, cust?.id ?? null, type, mode, subtotal, vat, total, days, type === 'credit' ? addDays(d, days) : null, items.map((i) => i.description).join('; ').slice(0, 300), str(b.notes, 300), req.user.id);
-    const sid = Number(sr.lastInsertRowid);
-    for (const i of items) {
-      await db.prepare('INSERT INTO sale_items(sale_id,product_id,description,qty,unit_price,amount,unit_cost) VALUES(?,?,?,?,?,?,?)').run(sid, i.p?.id ?? null, i.description, i.qty, i.price, i.amount, i.p?.cost ?? 0);
-      if (i.p) {
-        await db.prepare('UPDATE products SET stock=stock-? WHERE id=?').run(i.qty, i.p.id);
-        await db.prepare("INSERT INTO stock_moves(product_id,date,qty,reason,ref,user_id) VALUES(?,?,?,'Sale',?,?)").run(i.p.id, d, -i.qty, invNo, req.user.id);
-      }
-    }
-    if (type === 'cash') await cashEntry({ date: d, ref: invNo, description: 'Counter sale', party: cust?.name ?? 'Walk-in customer', category: CAT_SALES, mode, receipt: total, sale_id: sid, customer_id: cust?.id }, req.user);
-    await audit(req.user, 'create', 'sales', sid, `${invNo} ${total}`);
-    return sid;
-  });
-  res.status(201).json({ id: id, inv_no: (await db.prepare('SELECT inv_no FROM sales WHERE id=?').get(id)).inv_no });
+  const r = await saveSale(await parseSale(req.body ?? {}, req.user), req.user);
+  res.status(201).json(r);
+});
+app.put('/api/sales/:id', need('purchases'), async (req, res) => {
+  const old = await db.prepare('SELECT * FROM sales WHERE id=?').get(req.params.id);
+  if (!old) throw new HttpError(404, 'Invoice not found');
+  if (old.status === 'void') throw bad('A voided invoice cannot be edited');
+  if ((await db.prepare("SELECT COUNT(*) c FROM sale_returns WHERE sale_id=? AND status='active'").get(old.id)).c) throw bad('This invoice has returns. Void the credit notes first, then edit.');
+  res.json(await saveSale(await parseSale(req.body ?? {}, req.user, old), req.user, old));
 });
 app.post('/api/sales/:id/void', need('purchases'), async (req, res) => {
   const s = await db.prepare('SELECT * FROM sales WHERE id=?').get(req.params.id);
   if (!s) throw new HttpError(404, 'Invoice not found');
   if (s.status === 'void') throw bad('Already voided');
+  if ((await db.prepare("SELECT COUNT(*) c FROM sale_returns WHERE sale_id=? AND status='active'").get(s.id)).c) throw bad('This invoice has returns. Void the credit notes first.');
   await tx(async () => {
     for (const i of await db.prepare('SELECT * FROM sale_items WHERE sale_id=? AND product_id IS NOT NULL').all(s.id)) {
       if (s.source === 'excel') break; // imported lines never moved stock
@@ -352,43 +301,19 @@ ${items.map((i, n) => `<tr><td>${n + 1}</td><td>${esc(i.description)}</td><td cl
 app.get('/api/purchases', need('purchases'), async (req, res) => {
   res.json(await db.prepare(`SELECT p.id,p.bill_no,p.date,p.due_date,p.terms,p.subtotal,p.vat,p.total,p.status,p.description,s.name supplier FROM purchases p JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.date DESC,p.id DESC LIMIT 500`).all());
 });
+app.get('/api/purchases/:id', need('purchases'), async (req, res) => {
+  const p = await db.prepare('SELECT p.*, s.name supplier FROM purchases p JOIN suppliers s ON s.id=p.supplier_id WHERE p.id=?').get(req.params.id);
+  if (!p) throw new HttpError(404, 'Bill not found');
+  res.json({ ...p, items: await db.prepare('SELECT * FROM purchase_items WHERE purchase_id=? ORDER BY id').all(p.id) });
+});
 app.post('/api/purchases', need('purchases'), async (req, res) => {
-  const b = req.body ?? {};
-  const d = date(b.date), terms = b.terms === 'credit' ? 'credit' : 'cash';
-  const sup = await db.prepare('SELECT * FROM suppliers WHERE id=? AND active=1').get(b.supplier_id);
-  if (!sup) throw bad('Choose a supplier');
-  let items = [];
-  if (Array.isArray(b.items) && b.items.length) {
-    items = await Promise.all(b.items.map(async (i, n) => {
-      const qty = num(i.qty, `Item ${n + 1} quantity`, { allowZero: false }), cost = num(i.unit_cost, `Item ${n + 1} cost`);
-      const p = i.product_id ? await db.prepare('SELECT * FROM products WHERE id=?').get(i.product_id) : null;
-      const description = str(i.description, 200) ?? p?.name; if (!description) throw bad(`Item ${n + 1} needs a description or product`);
-      return { p, description, qty, cost, amount: r2(qty * cost) };
-    }));
-  }
-  const subtotal = items.length ? r2(items.reduce((s, i) => s + i.amount, 0)) : num(b.subtotal, 'Amount excl. VAT', { allowZero: false });
-  const vat = b.vat != null && b.vat !== '' ? r2(num(b.vat, 'VAT')) : r2(subtotal * vatRate());
-  const total = r2(subtotal + vat);
-  const days = terms === 'credit' ? Math.round(num(b.credit_days ?? getSetting('default_credit_days', '30'), 'Credit days')) : null;
-  const mode = terms === 'cash' ? modeOk(b.payment_mode ?? 'Cash') : null;
-  const id = await tx(async () => {
-    const r = await db.prepare(`INSERT INTO purchases(bill_no,date,supplier_id,description,subtotal,vat,total,terms,payment_mode,credit_days,due_date,notes,created_by)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(str(b.bill_no, 60), d, sup.id, str(b.description, 300) ?? items.map((i) => i.description).join('; ').slice(0, 300) ?? null, subtotal, vat, total, terms, mode, days, terms === 'credit' ? addDays(d, days) : null, str(b.notes, 300), req.user.id);
-    const pid = Number(r.lastInsertRowid);
-    for (const i of items) {
-      await db.prepare('INSERT INTO purchase_items(purchase_id,product_id,description,qty,unit_cost,amount) VALUES(?,?,?,?,?,?)').run(pid, i.p?.id ?? null, i.description, i.qty, i.cost, i.amount);
-      if (i.p) {
-        const newStock = i.p.stock + i.qty;
-        const avg = i.p.stock > 0 ? r2((i.p.stock * i.p.cost + i.qty * i.cost) / newStock) : i.cost; // weighted average cost
-        await db.prepare('UPDATE products SET stock=?, cost=? WHERE id=?').run(newStock, avg, i.p.id);
-        await db.prepare("INSERT INTO stock_moves(product_id,date,qty,reason,ref,user_id) VALUES(?,?,?,'Purchase',?,?)").run(i.p.id, d, i.qty, b.bill_no ?? null, req.user.id);
-      }
-    }
-    if (terms === 'cash') await cashEntry({ date: d, ref: str(b.bill_no, 40), description: `Purchase – ${sup.name}`, party: sup.name, category: CAT_PURCHASE, mode, payment: total, purchase_id: pid, supplier_id: sup.id }, req.user);
-    await audit(req.user, 'create', 'purchases', pid, `${sup.name} ${total}`);
-    return pid;
-  });
-  res.status(201).json({ id });
+  res.status(201).json({ id: await savePurchase(req.body ?? {}, req.user) });
+});
+app.put('/api/purchases/:id', need('purchases'), async (req, res) => {
+  const old = await db.prepare('SELECT * FROM purchases WHERE id=?').get(req.params.id);
+  if (!old) throw new HttpError(404, 'Bill not found');
+  if (old.status === 'void') throw bad('A voided bill cannot be edited');
+  res.json({ id: await savePurchase(req.body ?? {}, req.user, old) });
 });
 app.post('/api/purchases/:id/void', need('purchases'), async (req, res) => {
   const p = await db.prepare('SELECT * FROM purchases WHERE id=?').get(req.params.id);
@@ -508,6 +433,8 @@ app.put('/api/users/:id', need('*'), async (req, res) => {
 app.get('/api/audit', need('*'), async (req, res) => res.json(await db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 300').all()));
 app.get('/api/issues', need('view'), async (req, res) => res.json(await db.prepare("SELECT * FROM import_issues ORDER BY resolved, CASE severity WHEN 'error' THEN 0 WHEN 'warn' THEN 1 ELSE 2 END, id").all()));
 app.post('/api/issues/:id/resolve', need('cashbook'), async (req, res) => { await db.prepare('UPDATE import_issues SET resolved=? WHERE id=?').run(req.body?.resolved === false ? 0 : 1, req.params.id); res.json({ ok: true }); });
+
+registerFeatures(app);
 
 // ---------- static + errors ----------
 app.use(express.static(new URL('../public', import.meta.url).pathname, { extensions: ['html'] }));
