@@ -50,7 +50,7 @@ app.post('/api/auth/login', (req, res) => {
   const key = `${req.ip}|${String(username).toLowerCase()}`;
   const a = attempts.get(key) ?? { n: 0, until: 0 };
   if (a.until > Date.now()) throw new HttpError(429, 'Too many attempts. Try again in a few minutes.');
-  const u = db.prepare('SELECT * FROM users WHERE username=? AND active=1').get(String(username).trim());
+  const u = db.prepare('SELECT * FROM users WHERE username=? COLLATE NOCASE AND active=1').get(String(username).trim());
   if (!u || !verifyPassword(String(password), u.pass_hash)) {
     a.n++; if (a.n >= 5) { a.until = Date.now() + 5 * 60000; a.n = 0; }
     attempts.set(key, a);
