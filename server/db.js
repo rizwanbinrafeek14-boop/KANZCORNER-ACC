@@ -17,7 +17,7 @@ if (DATABASE_URL) {
   pg.types.setTypeParser(20, toNumber);   // bigint
   pg.types.setTypeParser(1700, toNumber); // numeric
   const ssl = process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: false };
-  pool = new pg.Pool({ connectionString: DATABASE_URL, ssl, max: Number(process.env.DATABASE_POOL_MAX) || 5 });
+  pool = new pg.Pool({ connectionString: DATABASE_URL, ssl, max: Number(process.env.DATABASE_POOL_MAX) || 5, connectionTimeoutMillis: 15000 });
   pool.on('error', (e) => console.error('Postgres pool error:', e.message));
 } else {
   const dir = process.env.KANZ_DATA_DIR || new URL('../data/pgdata', import.meta.url).pathname;
