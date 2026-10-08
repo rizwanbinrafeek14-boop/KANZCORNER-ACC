@@ -9,8 +9,28 @@ const opts = (rows, label = (r) => r.name, empty) => [...(empty ? [{ value: '', 
 /* ============ SALES ============ */
 export async function salesPage(root) {
   const f = { q: '', type: '', from: '', to: '' };
+  let tab = 'invoices';
   const holder = h('div');
+  const filters = h('div', { class: 'toolbar' },
+    h('input', { class: 'search', type: 'search', placeholder: 'Search invoice, customer…', 'aria-label': 'Search', oninput: debounce((e) => { f.q = e.target.value; load(); }) }),
+    h('select', { 'aria-label': 'Type', onchange: (e) => { f.type = e.target.value; load(); } }, h('option', { value: '' }, 'All types'), h('option', { value: 'cash' }, 'Cash'), h('option', { value: 'credit' }, 'Credit')),
+    h('input', { type: 'date', 'aria-label': 'From', onchange: (e) => { f.from = e.target.value; load(); } }),
+    h('input', { type: 'date', 'aria-label': 'To', onchange: (e) => { f.to = e.target.value; load(); } }));
   async function load() {
+    filters.classList.toggle('hide', tab !== 'invoices');
+    if (tab === 'returns') {
+      const rows = await api('/returns');
+      holder.replaceChildren(table([
+        { label: 'Credit note', render: (r) => h('b', null, r.ret_no) }, { label: 'Date', render: (r) => fmtDate(r.date) }, { label: 'Invoice', key: 'inv_no' },
+        { label: 'Customer', render: (r) => r.customer || 'Walk-in customer' },
+        { label: 'Refund', render: (r) => badge(r.refund_type === 'credit' ? 'To account' : r.refund_mode || 'Cash', r.refund_type === 'credit' ? 'warn' : 'info') },
+        { label: 'Total', num: true, render: (r) => money(r.total) },
+        { label: '', render: (r) => (r.status === 'void' ? statusBadge('void') : h('div', { class: 'row-act' },
+          h('a', { class: 'btn sm', href: `/creditnote/${r.id}`, target: '_blank', rel: 'noopener' }, icon('print'), 'Print'),
+          can('purchases') ? h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Void this credit note? Stock and refund will be reversed.', 'Void')) { await api(`/returns/${r.id}/void`, { method: 'POST', body: {} }); toast('Credit note voided'); load(); } } }, 'Void') : null)) },
+      ], rows, { empty: 'No returns yet. Open an invoice and choose "Return items".' }));
+      return;
+    }
     const rows = await api('/sales?' + new URLSearchParams(f));
     holder.replaceChildren(table([
       { label: 'Invoice', render: (r) => h('b', null, r.inv_no) },
@@ -22,38 +42,69 @@ export async function salesPage(root) {
       { label: 'Status', render: (r) => (r.status === 'void' ? statusBadge('void') : '') },
     ], rows, { onRow: (r) => saleDetail(r.id, load), empty: 'No invoices match.' }));
   }
-  const filters = h('div', { class: 'toolbar' },
-    h('input', { class: 'search', type: 'search', placeholder: 'Search invoice, customer…', 'aria-label': 'Search', oninput: debounce((e) => { f.q = e.target.value; load(); }) }),
-    h('select', { 'aria-label': 'Type', onchange: (e) => { f.type = e.target.value; load(); } }, h('option', { value: '' }, 'All types'), h('option', { value: 'cash' }, 'Cash'), h('option', { value: 'credit' }, 'Credit')),
-    h('input', { type: 'date', 'aria-label': 'From', onchange: (e) => { f.from = e.target.value; load(); } }),
-    h('input', { type: 'date', 'aria-label': 'To', onchange: (e) => { f.to = e.target.value; load(); } }));
-  root.append(pageHead('Sales', 'Cash and credit invoices', btn('Export', () => download('/export/sales'), '', 'down'), btn('New invoice', () => newInvoice(load), 'primary', 'plus')), filters, holder);
+  const tabBar = h('div', { class: 'tabs', role: 'tablist' }, [['invoices', 'Invoices'], ['returns', 'Credit notes / returns']].map(([k, l]) =>
+    h('button', { role: 'tab', class: k === tab ? 'on' : '', onclick: (e) => { tab = k; tabBar.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === e.currentTarget)); load(); } }, l)));
+  root.append(pageHead('Sales', 'Cash and credit invoices', btn('Export', () => download('/export/sales'), '', 'down'), btn('New invoice', () => newInvoice(load), 'primary', 'plus')), tabBar, filters, holder);
   await load();
 }
 
 async function saleDetail(id, reload) {
-  const s = await api('/sales/' + id);
-  openModal({ title: `Invoice ${s.inv_no}`, body: h('div', { class: 'grid' },
+  const [s, rets] = await Promise.all([api('/sales/' + id), api(`/sales/${id}/returns`)]);
+  const activeRets = rets.filter((r) => r.status === 'active');
+  const anyReturned = s.items.some((i) => i.returned > 0);
+  const modal = openModal({ title: `Invoice ${s.inv_no}`, body: h('div', { class: 'grid' },
     h('div', { class: 'fields' }, h('div', null, h('div', { class: 'muted' }, 'Customer'), h('b', null, s.customer || 'Walk-in customer')), h('div', null, h('div', { class: 'muted' }, 'Date / Due'), h('b', null, fmtDate(s.date) + (s.due_date ? ` → ${fmtDate(s.due_date)}` : '')))),
-    table([{ label: 'Item', key: 'description' }, { label: 'Qty', num: true, key: 'qty' }, { label: 'Price', num: true, render: (r) => money(r.unit_price) }, { label: 'Amount', num: true, render: (r) => money(r.amount) }], s.items),
+    table([{ label: 'Item', key: 'description' }, { label: 'Qty', num: true, key: 'qty' }, ...(anyReturned ? [{ label: 'Returned', num: true, key: 'returned' }] : []), { label: 'Price', num: true, render: (r) => money(r.unit_price) }, { label: 'Amount', num: true, render: (r) => money(r.amount) }], s.items),
     h('div', { class: 'totals' }, h('div', null, h('span', null, 'Subtotal'), money(s.subtotal)), h('div', null, h('span', null, 'VAT'), money(s.vat)), h('div', { class: 'g' }, h('span', null, 'Total'), sar(s.total))),
+    rets.length ? h('div', null, h('h3', { style: 'margin-bottom:8px' }, 'Credit notes'), h('div', { class: 'list' }, rets.map((r) => h('div', { class: 'it' }, h('div', null, h('b', null, r.ret_no), h('div', { class: 'muted' }, `${fmtDate(r.date)} · ${r.refund_type === 'credit' ? 'to account' : r.refund_mode}`)),
+      h('div', { class: 'row-act' }, r.status === 'void' ? statusBadge('void') : h('b', null, money(r.total)), h('a', { class: 'btn sm', href: `/creditnote/${r.id}`, target: '_blank', rel: 'noopener' }, icon('print'), 'Print')))))) : null,
     s.status === 'void' ? h('div', { class: 'err' }, 'This invoice is void.') : null),
     footer: (close) => [
-      s.status !== 'void' && can('purchases') ? h('button', { class: 'btn danger', onclick: async () => { if (await confirmDialog('Void this invoice? Stock and the cashbook entry will be reversed.', 'Void invoice')) { await api(`/sales/${id}/void`, { method: 'POST', body: {} }); toast('Invoice voided'); close(); reload(); } } }, 'Void') : null,
+      s.status !== 'void' && can('purchases') && !activeRets.length ? h('button', { class: 'btn danger', onclick: async () => { if (await confirmDialog('Void this invoice? Stock and the cashbook entry will be reversed.', 'Void invoice')) { await api(`/sales/${id}/void`, { method: 'POST', body: {} }); toast('Invoice voided'); close(); reload(); } } }, 'Void') : null,
+      s.status !== 'void' && can('purchases') && !activeRets.length ? h('button', { class: 'btn', onclick: () => { close(); newInvoice(reload, s); } }, 'Edit') : null,
+      s.status !== 'void' && can('sales') ? h('button', { class: 'btn', onclick: () => { close(); returnModal(s, reload); } }, 'Return items') : null,
       h('a', { class: 'btn primary', href: `/invoice/${id}`, target: '_blank', rel: 'noopener' }, icon('print'), 'Print / PDF')] });
+  return modal;
 }
 
-async function newInvoice(reload) {
+function returnModal(s, reload) {
+  const left = s.items.map((i) => ({ ...i, left: Math.round((i.qty - i.returned) * 1000) / 1000 })).filter((i) => i.left > 0);
+  const err = h('div', { class: 'err hide', role: 'alert' });
+  if (!left.length) { toast('Everything on this invoice has already been returned', true); return; }
+  const type = h('select', { name: 'refund_type', onchange: sync }, ...(s.customer_id ? [h('option', { value: 'credit' }, `Credit note to ${s.customer}'s account`)] : []), h('option', { value: 'cash' }, 'Refund money now'));
+  const mode = h('select', { name: 'refund_mode' }, state.meta.modes.map((m) => h('option', null, m)));
+  const modeL = h('label', { class: 'f' }, 'Refund by', mode);
+  const date = h('input', { type: 'date', value: today(), required: true });
+  const notes = h('input', { placeholder: 'Reason (optional)' });
+  function sync() { modeL.classList.toggle('hide', type.value !== 'cash'); }
+  sync();
+  const qtys = left.map((i) => h('input', { type: 'number', min: 0, max: i.left, step: 'any', value: 0, 'aria-label': `Return quantity ${i.description}`, style: 'max-width:110px' }));
+  const total = h('b', null, sar(0));
+  const recalc = () => { const sub = left.reduce((t, i, n) => t + (Number(qtys[n].value) || 0) * i.unit_price, 0); total.textContent = sar(Math.round(sub * (1 + Number(state.meta.settings.vat_rate)) * 100) / 100); };
+  qtys.forEach((q) => { q.oninput = recalc; });
+  openModal({ title: `Return items – ${s.inv_no}`, wide: true, body: h('div', null, err,
+    table([{ label: 'Item', key: 'description' }, { label: 'Can return', num: true, key: 'left' }, { label: 'Price', num: true, render: (r) => money(r.unit_price) }, { label: 'Return qty', render: (r) => qtys[left.indexOf(r)] }], left),
+    h('div', { class: 'fields', style: 'margin-top:14px' }, h('label', { class: 'f' }, 'Date', date), h('label', { class: 'f' }, 'What happens to the money', type), modeL, h('label', { class: 'f' }, 'Notes', notes)),
+    h('div', { class: 'totals' }, h('div', { class: 'g' }, h('span', null, 'Credit total (incl. VAT)'), total))),
+  footer: (close) => [h('button', { class: 'btn', onclick: close }, 'Cancel'), h('button', { class: 'btn primary', onclick: async (e) => {
+    const items = left.map((i, n) => ({ sale_item_id: i.id, qty: Number(qtys[n].value) || 0 })).filter((i) => i.qty > 0);
+    e.currentTarget.disabled = true; err.classList.add('hide');
+    try { const r = await api(`/sales/${s.id}/returns`, { method: 'POST', body: { date: date.value, refund_type: type.value, refund_mode: mode.value, notes: notes.value, items } }); toast(`Credit note ${r.ret_no} created`); close(); reload(); window.open(`/creditnote/${r.id}`, '_blank', 'noopener'); }
+    catch (ex) { err.textContent = ex.message; err.classList.remove('hide'); e.currentTarget.disabled = false; }
+  } }, 'Create credit note')] });
+}
+
+async function newInvoice(reload, existing = null) {
   const [customers, products] = await Promise.all([api('/customers'), api('/products')]);
   const rate = Number(state.meta.settings.vat_rate);
   const rows = h('div', { class: 'items' });
   const totals = h('div', { class: 'totals' });
-  const typeSel = h('select', { name: 'type', onchange: sync }, h('option', { value: 'cash' }, 'Cash / card sale'), h('option', { value: 'credit' }, 'Credit sale'));
-  const cust = h('select', { name: 'customer_id' }, optEls(customers, (c) => `${c.name}${c.balance ? ` (owes ${money(c.balance)})` : ''}`, 'Walk-in customer'));
-  const mode = h('select', { name: 'payment_mode' }, state.meta.modes.map((m) => h('option', null, m)));
-  const days = h('input', { name: 'credit_days', type: 'number', min: 0, value: state.meta.settings.default_credit_days || 30 });
-  const date = h('input', { name: 'date', type: 'date', value: today(), required: true });
-  const notes = h('input', { name: 'notes', placeholder: 'Optional' });
+  const typeSel = h('select', { name: 'type', onchange: sync, disabled: !!existing }, h('option', { value: 'cash', selected: existing?.type === 'cash' }, 'Cash / card sale'), h('option', { value: 'credit', selected: existing?.type === 'credit' }, 'Credit sale'));
+  const cust = h('select', { name: 'customer_id', value: existing?.customer_id ?? '' }, optEls(customers, (c) => `${c.name}${c.balance ? ` (owes ${money(c.balance)})` : ''}`, 'Walk-in customer'));
+  const mode = h('select', { name: 'payment_mode' }, state.meta.modes.map((m) => h('option', { selected: m === existing?.payment_mode }, m)));
+  const days = h('input', { name: 'credit_days', type: 'number', min: 0, value: existing?.credit_days ?? (state.meta.settings.default_credit_days || 30) });
+  const date = h('input', { name: 'date', type: 'date', value: existing?.date ?? today(), required: true });
+  const notes = h('input', { name: 'notes', placeholder: 'Optional', value: existing?.notes ?? '' });
   const lab = (t, el, cls = '') => h('label', { class: 'f ' + cls }, t, el);
   const cashOnly = lab('Payment mode', mode), creditOnly = lab('Credit days', days, 'hide');
   function sync() { const credit = typeSel.value === 'credit'; cashOnly.classList.toggle('hide', credit); creditOnly.classList.toggle('hide', !credit); }
@@ -62,7 +113,7 @@ async function newInvoice(reload) {
     const vat = Math.round(sub * rate * 100) / 100;
     totals.replaceChildren(h('div', null, h('span', null, 'Subtotal'), money(sub)), h('div', null, h('span', null, `VAT ${Math.round(rate * 100)}%`), money(vat)), h('div', { class: 'g' }, h('span', null, 'Total'), sar(sub + vat)));
   }
-  function addRow() {
+  function addRow(pre) {
     const prod = h('select', { name: 'product', 'aria-label': 'Product' }, h('option', { value: '' }, '— custom item —'), products.map((p) => h('option', { value: p.id }, `${p.name} (${p.stock} in stock)`)));
     const desc = h('input', { name: 'desc', placeholder: 'Description', 'aria-label': 'Description' });
     const qty = h('input', { name: 'qty', type: 'number', min: 0, step: 'any', value: 1, 'aria-label': 'Quantity' });
@@ -73,21 +124,23 @@ async function newInvoice(reload) {
     const upd = () => { total.textContent = money((Number(qty.value) || 0) * (Number(price.value) || 0)); recalc(); };
     qty.oninput = price.oninput = upd;
     rows.append(row);
+    if (pre && pre.description !== undefined) { prod.value = pre.product_id ?? ''; if (pre.product_id) desc.classList.add('hide'); desc.value = pre.description; qty.value = pre.qty; price.value = pre.unit_price; upd(); }
   }
-  addRow(); recalc(); sync();
+  if (existing) existing.items.forEach((i) => addRow(i)); else addRow();
+  recalc(); sync(); if (existing) cust.value = existing.customer_id ?? '';
   const err = h('div', { class: 'err hide', role: 'alert' });
-  const modal = openModal({ title: 'New invoice', wide: true, body: h('div', null, err,
+  const modal = openModal({ title: existing ? `Edit invoice ${existing.inv_no}` : 'New invoice', wide: true, body: h('div', null, err,
     h('div', { class: 'fields' }, lab('Sale type', typeSel), lab('Date', date), lab('Customer', cust), cashOnly, creditOnly, lab('Notes', notes, 'full')),
     h('h3', { style: 'margin:18px 0 8px' }, 'Items'), h('div', { class: 'items' }, h('div', { class: 'ih' }, h('span', null, 'Product / description'), h('span', null, 'Qty'), h('span', null, 'Price excl. VAT'), h('span', { class: 'num' }, 'Amount'), h('span'))),
     rows, h('div', { style: 'margin-top:10px' }, btn('Add line', addRow, 'sm', 'plus')), totals),
-    footer: (close) => [h('button', { class: 'btn', onclick: close }, 'Cancel'), h('button', { class: 'btn primary', onclick: (e) => submit(e.currentTarget, close, {}) }, 'Create invoice')] });
+    footer: (close) => [h('button', { class: 'btn', onclick: close }, 'Cancel'), h('button', { class: 'btn primary', onclick: (e) => submit(e.currentTarget, close, {}) }, existing ? 'Save changes' : 'Create invoice')] });
   async function submit(button, close, extra) {
     const items = [...rows.children].map((r) => ({ product_id: r.querySelector('[name=product]').value || null, description: r.querySelector('[name=desc]').value, qty: r.querySelector('[name=qty]').value, unit_price: r.querySelector('[name=price]').value }));
     button.disabled = true; err.classList.add('hide');
     try {
-      const r = await api('/sales', { method: 'POST', body: { type: typeSel.value, date: date.value, customer_id: cust.value || null, payment_mode: mode.value, credit_days: days.value, notes: notes.value, items, ...extra } });
-      toast(`Invoice ${r.inv_no} created`); close(); reload();
-      window.open(`/invoice/${r.id}`, '_blank', 'noopener');
+      const r = await api(existing ? `/sales/${existing.id}` : '/sales', { method: existing ? 'PUT' : 'POST', body: { type: typeSel.value, date: date.value, customer_id: cust.value || null, payment_mode: mode.value, credit_days: days.value, notes: notes.value, items, ...extra } });
+      toast(existing ? `Invoice ${r.inv_no} updated` : `Invoice ${r.inv_no} created`); close(); reload();
+      if (!existing) window.open(`/invoice/${r.id}`, '_blank', 'noopener');
     } catch (ex) {
       button.disabled = false;
       if (ex.status === 409 && /Credit limit/.test(ex.message) && can('parties') && await confirmDialog(ex.message + ' Create it anyway?', 'Override limit')) return submit(button, close, { ...extra, override_limit: true });
@@ -151,6 +204,12 @@ async function partyDetail(kind, id, reload) {
   const isC = kind === 'customer', p = await api(`/${kind}s/${id}`);
   const docs = isC ? p.sales : p.purchases, pays = p.payments;
   const wa = p.balance > 0 ? waLink(p.phone, reminderText(kind, p)) : null;
+  const stmtText = isC ? `Assalamu alaikum, statement of account from ${state.meta.settings.company_name} for ${p.name} (as of ${fmtDate(today())}):\n`
+    + `Balance due: SAR ${money(p.balance)} (overdue SAR ${money(p.overdue)})\n`
+    + (p.sales.filter((x) => x.type === 'credit' && x.status === 'active').slice(0, 5).map((x) => `• ${x.inv_no} ${fmtDate(x.date)} – SAR ${money(x.total)}`).join('\n') || '')
+    + (p.payments.length ? '\nLatest payments:\n' + p.payments.slice(0, 3).map((x) => `• ${fmtDate(x.date)} – SAR ${money(x.receipt)}`).join('\n') : '')
+    + '\nKindly confirm and arrange payment. Thank you.' : '';
+  const waStmt = isC ? waLink(p.phone, stmtText) : null;
   openModal({ title: p.name, wide: true, body: h('div', { class: 'grid' },
     h('div', { class: 'grid g4' }, kpi('Balance', sar(p.balance), '', 'wallet'), kpi('Overdue', sar(p.overdue), '', 'alert', p.overdue ? 'red' : 'teal'), kpi('0–30 days', money(p.b0_30), '', 'trend', 'teal'), kpi('31+ days', money(p.b31_60 + p.b61_90 + p.b90), '', 'trend', 'amber')),
     isC && p.credit_limit ? h('p', { class: 'muted' }, `Credit limit ${sar(p.credit_limit)} · available ${sar(p.available)}${p.over_limit ? ' · OVER LIMIT' : ''}`) : null,
@@ -158,7 +217,9 @@ async function partyDetail(kind, id, reload) {
       h('div', null, h('h3', { style: 'margin-bottom:8px' }, isC ? 'Invoices' : 'Bills'), table([{ label: 'No.', render: (r) => r.inv_no || r.bill_no || '–' }, { label: 'Date', render: (r) => fmtDate(r.date) }, { label: 'Total', num: true, render: (r) => money(r.total) }, { label: '', render: (r) => (r.status === 'void' ? statusBadge('void') : r.terms === 'cash' ? badge('Cash') : '') }], docs, { empty: 'None yet' })),
       h('div', null, h('h3', { style: 'margin-bottom:8px' }, isC ? 'Payments received' : 'Payments made'), table([{ label: 'Date', render: (r) => fmtDate(r.date) }, { label: 'Mode', key: 'mode' }, { label: 'Amount', num: true, render: (r) => money(r.receipt ?? r.payment) }], pays, { empty: 'No payments yet' })))),
   footer: (close) => [
-    wa ? h('a', { class: 'btn', href: wa, target: '_blank', rel: 'noopener' }, icon('wa'), isC ? 'WhatsApp reminder' : 'WhatsApp') : null,
+    isC ? h('a', { class: 'btn', href: `/statement/${id}`, target: '_blank', rel: 'noopener' }, icon('print'), 'Statement') : null,
+    waStmt ? h('a', { class: 'btn', href: waStmt, target: '_blank', rel: 'noopener' }, icon('wa'), 'Send statement') : null,
+    wa ? h('a', { class: 'btn', href: wa, target: '_blank', rel: 'noopener' }, icon('wa'), isC ? 'Payment reminder' : 'WhatsApp') : null,
     can('parties') ? btn('Edit', () => { close(); editParty(kind, p, reload); }) : null,
     can('cashbook_add') && (isC || can('cashbook')) ? btn(isC ? 'Record payment received' : 'Pay supplier', () => { close(); recordPayment(kind, p, reload); }, 'primary') : null] });
 }
@@ -182,29 +243,29 @@ export async function purchasesPage(root) {
       { label: 'Bill', render: (r) => h('b', null, r.bill_no || '—') }, { label: 'Date', render: (r) => fmtDate(r.date) }, { label: 'Supplier', key: 'supplier' },
       { label: 'Terms', render: (r) => badge(r.terms === 'credit' ? 'Credit' : 'Cash', r.terms === 'credit' ? 'warn' : 'info') }, { label: 'Due', render: (r) => fmtDate(r.due_date) },
       { label: 'Excl. VAT', num: true, render: (r) => money(r.subtotal) }, { label: 'VAT', num: true, render: (r) => money(r.vat) }, { label: 'Total', num: true, render: (r) => money(r.total) },
-      { label: '', render: (r) => (r.status === 'void' ? statusBadge('void') : r.status === 'active' && can('purchases') ? h('button', { class: 'btn sm danger', onclick: async (e) => { e.stopPropagation(); if (await confirmDialog('Void this bill? Stock and cashbook entry will be reversed.', 'Void bill')) { await api(`/purchases/${r.id}/void`, { method: 'POST', body: {} }); toast('Bill voided'); load(); } } }, 'Void') : '') },
+      { label: '', render: (r) => (r.status === 'void' ? statusBadge('void') : r.status === 'active' && can('purchases') ? h('div', { class: 'row-act' }, h('button', { class: 'btn sm', onclick: async (e) => { e.stopPropagation(); newBill(load, await api('/purchases/' + r.id)); } }, 'Edit'), h('button', { class: 'btn sm danger', onclick: async (e) => { e.stopPropagation(); if (await confirmDialog('Void this bill? Stock and cashbook entry will be reversed.', 'Void bill')) { await api(`/purchases/${r.id}/void`, { method: 'POST', body: {} }); toast('Bill voided'); load(); } } }, 'Void')) : '') },
     ], rows, { empty: 'No purchase bills yet.' }));
   }
   root.append(pageHead('Purchases', 'Supplier bills — credit bills build what you owe', btn('Export', () => download('/export/purchases'), '', 'down'), btn('New bill', () => newBill(load), 'primary', 'plus')), holder);
   await load();
 }
 
-async function newBill(reload) {
+async function newBill(reload, existing = null) {
   const [sups, products] = await Promise.all([api('/suppliers'), api('/products')]);
   const rate = Number(state.meta.settings.vat_rate);
   let itemised = false;
   const rows = h('div', { class: 'items hide' });
   const quick = h('div', { class: 'fields' });
   const inputs = {
-    supplier: h('select', { name: 'supplier_id', required: true }, optEls(sups, (s) => s.name, 'Choose supplier…')),
-    bill: h('input', { name: 'bill_no', placeholder: 'Supplier invoice number' }),
-    date: h('input', { name: 'date', type: 'date', value: today(), required: true }),
-    terms: h('select', { name: 'terms', onchange: sync }, h('option', { value: 'credit' }, 'Credit (pay later)'), h('option', { value: 'cash' }, 'Paid now')),
-    mode: h('select', { name: 'payment_mode' }, state.meta.modes.map((m) => h('option', null, m))),
-    days: h('input', { name: 'credit_days', type: 'number', min: 0, value: state.meta.settings.default_credit_days || 30 }),
-    amount: h('input', { name: 'subtotal', type: 'number', min: 0, step: 'any', oninput: recalc }),
-    desc: h('input', { name: 'description', placeholder: 'What was bought' }),
-    vat: h('input', { name: 'vat', type: 'number', min: 0, step: 'any', placeholder: 'Auto (15%)', oninput: recalc }),
+    supplier: h('select', { name: 'supplier_id', required: true, value: existing?.supplier_id ?? '' }, optEls(sups, (s) => s.name, 'Choose supplier…')),
+    bill: h('input', { name: 'bill_no', placeholder: 'Supplier invoice number', value: existing?.bill_no ?? '' }),
+    date: h('input', { name: 'date', type: 'date', value: existing?.date ?? today(), required: true }),
+    terms: h('select', { name: 'terms', onchange: sync, disabled: !!existing }, h('option', { value: 'credit', selected: existing?.terms === 'credit' }, 'Credit (pay later)'), h('option', { value: 'cash', selected: existing?.terms === 'cash' }, 'Paid now')),
+    mode: h('select', { name: 'payment_mode' }, state.meta.modes.map((m) => h('option', { selected: m === existing?.payment_mode }, m))),
+    days: h('input', { name: 'credit_days', type: 'number', min: 0, value: existing?.credit_days ?? (state.meta.settings.default_credit_days || 30) }),
+    amount: h('input', { name: 'subtotal', type: 'number', min: 0, step: 'any', oninput: recalc, value: existing && !existing.items.length ? existing.subtotal : '' }),
+    desc: h('input', { name: 'description', placeholder: 'What was bought', value: existing && !existing.items.length ? existing.description ?? '' : '' }),
+    vat: h('input', { name: 'vat', type: 'number', min: 0, step: 'any', placeholder: 'Auto (15%)', oninput: recalc, value: existing && Math.abs(existing.vat - existing.subtotal * rate) > 0.01 ? existing.vat : '' }),
   };
   const lab = (t, el, cls = '') => h('label', { class: 'f ' + cls }, t, el);
   const modeL = lab('Payment mode', inputs.mode, 'hide'), daysL = lab('Credit days', inputs.days);
@@ -215,7 +276,7 @@ async function newBill(reload) {
     const vat = inputs.vat.value !== '' ? Number(inputs.vat.value) : Math.round(sub * rate * 100) / 100;
     totals.replaceChildren(h('div', null, h('span', null, 'Excl. VAT'), money(sub)), h('div', null, h('span', null, 'VAT'), money(vat)), h('div', { class: 'g' }, h('span', null, 'Total'), sar(sub + vat)));
   }
-  function addRow() {
+  function addRow(pre) {
     const prod = h('select', { name: 'product', 'aria-label': 'Product' }, h('option', { value: '' }, '— other item —'), products.map((p) => h('option', { value: p.id }, p.name)));
     const desc = h('input', { name: 'desc', placeholder: 'Description' });
     const qty = h('input', { name: 'qty', type: 'number', min: 0, step: 'any', value: 1, 'aria-label': 'Quantity' });
@@ -226,13 +287,15 @@ async function newBill(reload) {
     const upd = () => { tot.textContent = money((Number(qty.value) || 0) * (Number(cost.value) || 0)); recalc(); };
     qty.oninput = cost.oninput = upd;
     rows.append(row);
+    if (pre && pre.description !== undefined) { prod.value = pre.product_id ?? ''; if (pre.product_id) desc.classList.add('hide'); desc.value = pre.description; qty.value = pre.qty; cost.value = pre.unit_cost; upd(); }
   }
   const toggle = h('button', { class: 'btn sm', type: 'button', onclick: () => { itemised = !itemised; rows.classList.toggle('hide', !itemised); itemBox.classList.toggle('hide', !itemised); quick.classList.toggle('hide', itemised); toggle.textContent = itemised ? 'Switch to quick amount' : 'Itemise (updates stock)'; recalc(); if (itemised && !rows.children.length) addRow(); } }, 'Itemise (updates stock)');
   const itemBox = h('div', { class: 'hide' }, h('div', { class: 'items' }, h('div', { class: 'ih' }, h('span', null, 'Product / description'), h('span', null, 'Qty'), h('span', null, 'Unit cost'), h('span', { class: 'num' }, 'Amount'), h('span'))), rows, h('div', { style: 'margin-top:10px' }, btn('Add line', addRow, 'sm', 'plus')));
   quick.append(lab('Amount excl. VAT', inputs.amount), lab('Description', inputs.desc));
   sync(); recalc();
+  if (existing?.items.length) { existing.items.forEach((i) => addRow(i)); toggle.click(); }
   const err = h('div', { class: 'err hide', role: 'alert' });
-  openModal({ title: 'New purchase bill', wide: true, body: h('div', null, err,
+  openModal({ title: existing ? `Edit bill ${existing.bill_no ?? ''}` : 'New purchase bill', wide: true, body: h('div', null, err,
     h('div', { class: 'fields' }, lab('Supplier', inputs.supplier), lab('Bill number', inputs.bill), lab('Date', inputs.date), lab('Terms', inputs.terms), modeL, daysL, lab('VAT override', inputs.vat, 'full')),
     h('div', { style: 'display:flex;justify-content:space-between;align-items:center;margin:18px 0 10px' }, h('h3', null, 'Amount'), toggle), quick, itemBox, totals),
     footer: (close) => [h('button', { class: 'btn', onclick: close }, 'Cancel'), h('button', { class: 'btn primary', onclick: async (e) => {
@@ -240,9 +303,9 @@ async function newBill(reload) {
       const body = { supplier_id: inputs.supplier.value, bill_no: inputs.bill.value, date: inputs.date.value, terms: inputs.terms.value, payment_mode: inputs.mode.value, credit_days: inputs.days.value, vat: inputs.vat.value, description: inputs.desc.value };
       if (itemised) body.items = [...rows.children].map((r) => ({ product_id: r.querySelector('[name=product]').value || null, description: r.querySelector('[name=desc]').value, qty: r.querySelector('[name=qty]').value, unit_cost: r.querySelector('[name=cost]').value }));
       else body.subtotal = inputs.amount.value;
-      try { await api('/purchases', { method: 'POST', body }); toast('Bill saved'); close(); reload(); }
+      try { await api(existing ? `/purchases/${existing.id}` : '/purchases', { method: existing ? 'PUT' : 'POST', body }); toast('Bill saved'); close(); reload(); }
       catch (ex) { err.textContent = ex.message; err.classList.remove('hide'); e.currentTarget.disabled = false; }
-    } }, 'Save bill')] });
+    } }, existing ? 'Save changes' : 'Save bill')] });
 }
 
 /* ============ PRODUCTS ============ */

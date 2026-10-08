@@ -1,4 +1,5 @@
 import { h, api, state, money, sar, fmtDate, toast, badge, statusBadge, can, icon, table, kpi, formModal, openModal, confirmDialog, chart, palette, download, waLink } from './js/lib.js';
+import { posPage } from './js/pos.js';
 import { pageHead, salesPage, customersPage, suppliersPage, purchasesPage, productsPage, cashbookPage } from './js/pages.js';
 
 const app = document.getElementById('app');
@@ -14,6 +15,7 @@ const toggleTheme = () => {
 const ROUTES = [
   { path: 'dashboard', label: 'Dashboard', icon: 'home', page: dashboardPage },
   { section: 'Sell' },
+  { path: 'pos', label: 'Quick sale', icon: 'bolt', page: posPage, perm: 'sales' },
   { path: 'sales', label: 'Sales', icon: 'cart', page: salesPage, perm: 'sales' },
   { path: 'customers', label: 'Customers', icon: 'users', page: customersPage },
   { section: 'Buy' },
@@ -137,8 +139,9 @@ async function dashboardPage(root) {
 async function reportsPage(root) {
   const y = await api('/reports/year');
   const ag = await api('/reports/ageing');
+  const acc = await api('/reports/accrual');
   const body = h('div');
-  const tabs = [['monthly', 'Monthly summary'], ['pnl', 'Profit & loss'], ['vat', 'VAT (ZATCA)'], ['ageing', 'Ageing']];
+  const tabs = [['monthly', 'Monthly summary'], ['pnl', 'Profit & loss (cash)'], ['accrual', 'Profit & loss (accrual)'], ['vat', 'VAT (ZATCA)'], ['ageing', 'Ageing']];
   let cur = 'monthly';
   const grid = (head, lines, { total } = {}) => h('div', { class: 'tablewrap' }, h('table', { class: 'rep' },
     h('thead', null, h('tr', null, ['SAR', ...y.months, 'Year'].map((m, i) => h('th', { class: i ? 'num' : '' }, m)))),
@@ -152,12 +155,20 @@ async function reportsPage(root) {
         ['Sales – counter (excl. VAT)', p.salesCash], ['Sales – credit (excl. VAT)', p.salesCredit], ['Less: sales returns', p.returns.map((x) => -x)], ['Net sales', p.netSales, { bold: true }],
         ['Cost of goods – cash purchases', p.cogsCash], ['Cost of goods – credit purchases', p.cogsCredit], ['Gross profit', p.gross, { bold: true }], ['Other income', p.other],
         ...Object.entries(p.expenses).map(([k, a]) => [k, a]), ['Total expenses', p.totalExpenses], ['NET PROFIT / (LOSS)', p.net, { bold: true }]])],
+      accrual: () => [h('p', { class: 'muted' }, 'Revenue is counted when you invoice (not when money arrives). Cost of goods is what the products you sold actually cost, from the cost price on each product at the time of sale.'),
+        acc.costCoverage !== null && acc.costCoverage < 100 ? h('div', { class: 'err' }, `Only ${acc.costCoverage}% of invoiced sales have a product cost, so profit is overstated. Add cost prices on the Products page and link sales to products for exact figures.`) : null,
+        grid(null, [['Revenue invoiced (excl. VAT)', acc.revenue], ['Less: returns / credit notes', acc.returns.map((x) => -x)], ['Net revenue', acc.netRevenue, { bold: true }], ['Cost of goods sold', acc.cogs], ['Gross profit', acc.gross, { bold: true }], ['Other income', acc.other],
+          ...Object.entries(acc.expenses).map(([k, v]) => [k, v]), ['Total expenses', acc.totalExpenses], ['NET PROFIT / (LOSS)', acc.net, { bold: true }]]),
+        h('h3', { style: 'margin:22px 0 8px' }, 'Profit by product'), profitTable(acc.byProduct, true), h('h3', { style: 'margin:22px 0 8px' }, 'Profit by customer'), profitTable(acc.byCustomer, false)],
       vat: () => [h('p', { class: 'muted' }, 'Working estimate for ZATCA filing — confirm VAT treatment of each category with your accountant before filing.'), grid(null, [
         ['Output VAT – cash sales', v.outputCash], ['Output VAT – credit sales', v.outputCredit], ['Less: returns VAT', v.returns.map((x) => -x)], ['TOTAL OUTPUT VAT', v.outputTotal, { bold: true }],
         ['Input VAT – cash purchases & expenses', v.inputCash], ['Input VAT – credit purchases', v.inputCredit], ['TOTAL INPUT VAT', v.inputTotal, { bold: true }], ['VAT PAYABLE / (REFUNDABLE)', v.payable, { bold: true }]])],
       ageing: () => [h('h3', { style: 'margin-bottom:8px' }, 'Customers (receivables)'), ageTable(ag.customers), h('h3', { style: 'margin:20px 0 8px' }, 'Suppliers (payables)'), ageTable(ag.suppliers)],
     })[cur]());
   }
+  const profitTable = (rows, withQty) => table([{ label: 'Name', key: 'name' }, ...(withQty ? [{ label: 'Qty sold', num: true, render: (r) => money(r.qty, 0) }] : []), { label: 'Revenue', num: true, render: (r) => money(r.revenue) },
+    { label: 'Cost', num: true, render: (r) => (r.cost ? money(r.cost) : h('span', { class: 'muted' }, 'no cost')) }, { label: 'Profit', num: true, render: (r) => (r.cost ? h('b', { class: r.profit < 0 ? 'neg' : '' }, money(r.profit)) : '–') },
+    { label: 'Margin', num: true, render: (r) => (r.margin === null ? '–' : h('span', { class: r.margin >= 20 ? 'pos' : r.margin < 10 ? 'neg' : '' }, r.margin + '%')) }], rows, { empty: 'No sales this year yet.' });
   const ageTable = (rows) => table([{ label: 'Name', key: 'name' }, { label: 'Balance', num: true, render: (r) => money(r.balance) }, { label: 'Overdue', num: true, render: (r) => money(r.overdue) }, { label: '0–30', num: true, render: (r) => money(r.b0_30) }, { label: '31–60', num: true, render: (r) => money(r.b31_60) }, { label: '61–90', num: true, render: (r) => money(r.b61_90) }, { label: '90+', num: true, render: (r) => money(r.b90) }], rows,
     { empty: 'Nothing outstanding', footer: (c, i) => (i === 0 ? 'Total' : c.num ? money(sum(rows.map((r) => r[({ 1: 'balance', 2: 'overdue', 3: 'b0_30', 4: 'b31_60', 5: 'b61_90', 6: 'b90' })[i]]))) : '') });
   const tabBar = h('div', { class: 'tabs', role: 'tablist' }, tabs.map(([k, l]) => h('button', { role: 'tab', class: k === cur ? 'on' : '', onclick: (e) => { cur = k; tabBar.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === e.currentTarget)); show(); } }, l)));
@@ -196,4 +207,5 @@ async function settingsPage(root) {
     table([{ label: 'When', render: (r) => String(r.ts).replace('T', ' ').slice(0, 16) }, { label: 'Who', key: 'user_name' }, { label: 'Action', render: (r) => badge(r.action) }, { label: 'What', render: (r) => `${r.entity ?? ''} ${r.detail ?? ''}`.slice(0, 120) }], audit));
 }
 
+if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
 boot();

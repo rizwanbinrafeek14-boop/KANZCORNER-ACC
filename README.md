@@ -14,6 +14,12 @@ npm test
 
 Needs Node 18.18+ (Node 22 recommended).
 
+## What's inside
+Dashboard · **Quick sale** (touch-friendly counter screen, installable on a phone: browser menu → *Install app*) · Sales invoices
+(edit, void, **returns / credit notes**) · Customers (ledger, ageing, **printable statement**, WhatsApp reminders/statements) ·
+Suppliers · Purchases (edit, void) · Products & stock · Cashbook · Reports (monthly, cash-basis P&L, **accrual P&L with profit by
+product and customer**, VAT, ageing) · Users & roles · Import check.
+
 ## First sign-in
 Open the site. The **first screen asks you to create the admin account** (name, username, password) – that user becomes the
 owner. After that the screen never appears again; the owner adds staff under *Settings & users*.
