@@ -13,12 +13,31 @@ npm start                                                       # http://localho
 npm test
 ```
 
-Needs Node 22.13+. No external database server: data lives in one SQLite file (`KANZ_DB`, default `data/kanz.db`).
-**Back this file up** (copy it daily) – it is your whole accounting record.
+Needs Node 22.13+.
+
+## Database
+* **Hosted Postgres (Supabase, recommended for going live):** set `DATABASE_URL` to your connection string. Tables are created
+  automatically on first start and your Excel data is imported once. Row-level security is switched on for every table so
+  Supabase's public API cannot read them – only this server can.
+* **No `DATABASE_URL`:** an embedded Postgres stores data in `KANZ_DATA_DIR` (default `data/pgdata`). Fine for trying it out;
+  keep the folder backed up.
+
+### Supabase setup
+1. supabase.com → New project (save the database password).
+2. **Connect** button → **Session pooler** connection string (works over IPv4 – most hosts need this), e.g.
+   `postgres://postgres.<ref>:<PASSWORD>@aws-0-<region>.pooler.supabase.com:5432/postgres`
+3. On your host add the environment variables below. **Never commit the string or paste it in chat.**
+
+| Variable | Meaning |
+|---|---|
+| `DATABASE_URL` | Supabase connection string |
+| `KANZ_ADMIN_USERNAME` / `KANZ_ADMIN_PASSWORD` | Your owner login (created/reset at every start) |
+| `DATABASE_SSL` | `false` only for a local non-SSL Postgres |
+| `DATABASE_POOL_MAX` | Max connections (default 5) |
 
 ## Going live (hosted)
-Deploy the `Dockerfile` to any host with a persistent disk mounted at `/data` (Render, Railway, Fly.io, a VPS).
-Put it behind HTTPS (the host usually does this) and set `KANZ_ADMIN_PASSWORD` before the first start.
+Start command `npm start` (entry `server.js`), Node 22. With Supabase no persistent disk is needed. (Docker users: the `Dockerfile` uses the embedded database in `/data`.)
+Put it behind HTTPS (the host usually does this) and set the admin variables before the first start.
 
 ## How the numbers work (same rules as your Excel)
 * **Cashbook** is the source of truth for cash/bank. Cash sales and cash purchases made in the app write a cashbook line automatically.

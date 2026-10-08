@@ -4,9 +4,9 @@ const vatRate = () => Number(getSetting('vat_rate', '0.15'));
 const today = () => new Date().toISOString().slice(0, 10);
 const daysBetween = (a, b) => Math.floor((new Date(a) - new Date(b)) / 86400000);
 
-export function cashPosition(asOf = '9999-12-31') {
+export async function cashPosition(asOf = '9999-12-31') {
   const open = Number(getSetting('opening_cash', 0)), openBank = Number(getSetting('opening_bank', 0));
-  const rows = db.prepare(`SELECT CASE WHEN mode='Cash' THEN 'cash' ELSE 'bank' END k, SUM(receipt) r, SUM(payment) p
+  const rows = await db.prepare(`SELECT CASE WHEN mode='Cash' THEN 'cash' ELSE 'bank' END k, SUM(receipt) r, SUM(payment) p
     FROM cashbook WHERE date<=? GROUP BY k`).all(asOf);
   const g = (k) => rows.find((x) => x.k === k) ?? { r: 0, p: 0 };
   const cash = r2(open + g('cash').r - g('cash').p), bank = r2(openBank + g('bank').r - g('bank').p);
@@ -31,10 +31,10 @@ function ageing(invoices, balance, asOf) {
   return out;
 }
 
-export function customerLedger(asOf = today()) {
-  const custs = db.prepare('SELECT * FROM customers WHERE active=1 ORDER BY name').all();
-  const sales = db.prepare("SELECT customer_id, date, due_date, total FROM sales WHERE type='credit' AND status='active' AND customer_id IS NOT NULL").all();
-  const pays = db.prepare(`SELECT customer_id, SUM(receipt) paid, MAX(date) last FROM cashbook WHERE category=? AND customer_id IS NOT NULL GROUP BY customer_id`).all(CAT_CUSTOMER_PAYMENT);
+export async function customerLedger(asOf = today()) {
+  const custs = await db.prepare('SELECT * FROM customers WHERE active=1 ORDER BY name').all();
+  const sales = await db.prepare("SELECT customer_id, date, due_date, total FROM sales WHERE type='credit' AND status='active' AND customer_id IS NOT NULL").all();
+  const pays = await db.prepare(`SELECT customer_id, SUM(receipt) paid, MAX(date) last FROM cashbook WHERE category=? AND customer_id IS NOT NULL GROUP BY customer_id`).all(CAT_CUSTOMER_PAYMENT);
   return custs.map((c) => {
     const inv = sales.filter((s) => s.customer_id === c.id);
     const credit = r2(inv.reduce((s, i) => s + i.total, 0));
@@ -48,10 +48,10 @@ export function customerLedger(asOf = today()) {
   });
 }
 
-export function supplierLedger(asOf = today()) {
-  const sups = db.prepare('SELECT * FROM suppliers WHERE active=1 ORDER BY name').all();
-  const purs = db.prepare("SELECT supplier_id, date, due_date, total FROM purchases WHERE terms='credit' AND status='active'").all();
-  const pays = db.prepare(`SELECT supplier_id, SUM(payment) paid, MAX(date) last FROM cashbook WHERE category=? AND supplier_id IS NOT NULL GROUP BY supplier_id`).all(CAT_SUPPLIER_PAYMENT);
+export async function supplierLedger(asOf = today()) {
+  const sups = await db.prepare('SELECT * FROM suppliers WHERE active=1 ORDER BY name').all();
+  const purs = await db.prepare("SELECT supplier_id, date, due_date, total FROM purchases WHERE terms='credit' AND status='active'").all();
+  const pays = await db.prepare(`SELECT supplier_id, SUM(payment) paid, MAX(date) last FROM cashbook WHERE category=? AND supplier_id IS NOT NULL GROUP BY supplier_id`).all(CAT_SUPPLIER_PAYMENT);
   return sups.map((s) => {
     const inv = purs.filter((p) => p.supplier_id === s.id);
     const credit = r2(inv.reduce((a, i) => a + i.total, 0));
@@ -69,14 +69,14 @@ const zero = () => Array(12).fill(0);
 const sumTo = (arr) => r2(arr.reduce((a, b) => a + b, 0));
 
 // Monthly aggregates for one financial year, cash-basis like the Excel (cashbook + credit registers)
-export function yearReport(year = Number(getSetting('financial_year', new Date().getFullYear()))) {
+export async function yearReport(year = Number(getSetting('financial_year', new Date().getFullYear()))) {
   const vr = vatRate(), vatShare = vr / (1 + vr);
   const catVat = new Map(CATEGORIES.map((c) => [c.name, c.vat]));
-  const rows = db.prepare(`SELECT CAST(substr(date,6,2) AS INTEGER) m, category, SUM(receipt) r, SUM(payment) p
+  const rows = await db.prepare(`SELECT CAST(substr(date,6,2) AS INTEGER) m, category, SUM(receipt) r, SUM(payment) p
     FROM cashbook WHERE substr(date,1,4)=? GROUP BY m, category`).all(String(year));
-  const cs = db.prepare(`SELECT CAST(substr(date,6,2) AS INTEGER) m, SUM(subtotal) s, SUM(vat) v FROM sales
+  const cs = await db.prepare(`SELECT CAST(substr(date,6,2) AS INTEGER) m, SUM(subtotal) s, SUM(vat) v FROM sales
     WHERE type='credit' AND status='active' AND substr(date,1,4)=? GROUP BY m`).all(String(year));
-  const cp = db.prepare(`SELECT CAST(substr(date,6,2) AS INTEGER) m, SUM(subtotal) s, SUM(vat) v FROM purchases
+  const cp = await db.prepare(`SELECT CAST(substr(date,6,2) AS INTEGER) m, SUM(subtotal) s, SUM(vat) v FROM purchases
     WHERE terms='credit' AND status='active' AND substr(date,1,4)=? GROUP BY m`).all(String(year));
 
   const receipts = zero(), payments = zero();
@@ -128,17 +128,17 @@ export function yearReport(year = Number(getSetting('financial_year', new Date()
   };
 }
 
-export function dashboard() {
+export async function dashboard() {
   const year = Number(getSetting('financial_year', new Date().getFullYear()));
   const asOf = today();
-  const rep = yearReport(year);
-  const cash = cashPosition();
-  const cust = customerLedger(asOf), sup = supplierLedger(asOf);
+  const rep = await yearReport(year);
+  const cash = await cashPosition();
+  const cust = await customerLedger(asOf), sup = await supplierLedger(asOf);
   const m = new Date().getMonth();
-  const low = db.prepare('SELECT id,sku,name,stock,reorder_level,unit FROM products WHERE active=1 AND stock<=reorder_level AND reorder_level>0 ORDER BY stock LIMIT 8').all();
-  const stockValue = db.prepare('SELECT COALESCE(SUM(stock*cost),0) v FROM products WHERE active=1 AND stock>0').get().v;
-  const top = db.prepare(`SELECT c.name, SUM(s.total) total FROM sales s JOIN customers c ON c.id=s.customer_id WHERE s.status='active' GROUP BY c.id ORDER BY total DESC LIMIT 5`).all();
-  const recent = db.prepare('SELECT * FROM cashbook ORDER BY date DESC, id DESC LIMIT 8').all();
+  const low = await db.prepare('SELECT id,sku,name,stock,reorder_level,unit FROM products WHERE active=1 AND stock<=reorder_level AND reorder_level>0 ORDER BY stock LIMIT 8').all();
+  const stockValue = (await db.prepare('SELECT COALESCE(SUM(stock*cost),0) v FROM products WHERE active=1 AND stock>0').get()).v;
+  const top = await db.prepare(`SELECT c.name, SUM(s.total) total FROM sales s JOIN customers c ON c.id=s.customer_id WHERE s.status='active' GROUP BY c.id ORDER BY total DESC LIMIT 5`).all();
+  const recent = await db.prepare('SELECT * FROM cashbook ORDER BY date DESC, id DESC LIMIT 8').all();
   const sum = (a, k) => r2(a.reduce((s, x) => s + x[k], 0));
   return {
     year, asOf, cash, stockValue: r2(stockValue),

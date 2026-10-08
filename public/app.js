@@ -175,7 +175,7 @@ async function settingsPage(root) {
           h('button', { class: 'btn sm', onclick: () => formModal({ title: `Reset password – ${u.username}`, fields: [{ name: 'password', label: 'New password (min 8)', type: 'password', required: true, full: true }], onSubmit: async (v) => { await api('/users/' + u.id, { method: 'PUT', body: v }); toast('Password reset'); } }) }, 'Reset'),
           u.id !== state.user.id ? h('button', { class: 'btn sm', onclick: async () => { await api('/users/' + u.id, { method: 'PUT', body: { active: !u.active } }); refresh(); } }, u.active ? 'Disable' : 'Enable') : null)))))),
     h('h3', { style: 'margin:22px 0 10px' }, 'Activity log'),
-    table([{ label: 'When', render: (r) => r.at }, { label: 'Who', key: 'user_name' }, { label: 'Action', render: (r) => badge(r.action) }, { label: 'What', render: (r) => `${r.entity ?? ''} ${r.detail ?? ''}`.slice(0, 120) }], audit));
+    table([{ label: 'When', render: (r) => String(r.ts).replace('T', ' ').slice(0, 16) }, { label: 'Who', key: 'user_name' }, { label: 'Action', render: (r) => badge(r.action) }, { label: 'What', render: (r) => `${r.entity ?? ''} ${r.detail ?? ''}`.slice(0, 120) }], audit));
 }
 
 boot();

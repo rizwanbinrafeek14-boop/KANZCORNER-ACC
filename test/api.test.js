@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const dir = mkdtempSync(join(tmpdir(), 'kanz-'));
-process.env.KANZ_DB = join(dir, 't.db');
+process.env.KANZ_DATA_DIR = join(dir, 'pg');
 const { app } = await import('../server/index.js');
 const { importExcel } = await import('../server/seed.js');
 const { cashPosition, customerLedger, supplierLedger } = await import('../server/ledger.js');
@@ -21,19 +21,19 @@ const call = async (method, path, body, ck = cookie) => {
 };
 
 before(async () => {
-  importExcel({ adminPassword: 'test-password-1' });
+  await importExcel({ adminPassword: 'test-password-1' });
   server = app.listen(0); base = `http://127.0.0.1:${server.address().port}`;
 });
 after(() => { server.close(); rmSync(dir, { recursive: true, force: true }); });
 
-test('Excel import reconciles with the workbook', () => {
-  const p = cashPosition();
+test('Excel import reconciles with the workbook', async () => {
+  const p = await cashPosition();
   assert.equal(p.receipts, 13558.91);
   assert.equal(p.payments, 3982.05);
   assert.equal(p.total, 9576.86);
-  const cust = customerLedger('2026-10-08');
+  const cust = await customerLedger('2026-10-08');
   assert.equal(Math.round(cust.reduce((s, c) => s + c.balance, 0) * 100) / 100, 4353.92);
-  const sup = supplierLedger('2026-10-08');
+  const sup = await supplierLedger('2026-10-08');
   assert.equal(Math.round(sup.reduce((s, c) => s + c.balance, 0) * 100) / 100, 6752.11);
 });
 
