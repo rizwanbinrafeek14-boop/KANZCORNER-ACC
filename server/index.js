@@ -1,7 +1,7 @@
 import express from 'express';
 import QRCode from 'qrcode';
 import { db, tx, r2, claimOnce, getSetting, setSetting, allSettings, nextInvoiceNumber, audit, CATEGORIES, MODES, CAT_CUSTOMER_PAYMENT, CAT_SUPPLIER_PAYMENT, CAT_SALES, CAT_PURCHASE } from './db.js';
-import { hashPassword, verifyPassword, makeToken, readToken, can } from './auth.js';
+import { hashPassword, verifyPassword, makeToken, readToken, can, TTL_MS, RENEW_BELOW_MS, tokenExpiry } from './auth.js';
 import { cashPosition, customerLedger, supplierLedger, yearReport, dashboard } from './ledger.js';
 
 export const app = express();
@@ -35,7 +35,10 @@ app.use('/api', async (req, res, next) => {
   // mutations must be JSON (blocks cross-site form posts) – combined with SameSite=Strict cookie
   if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method) && req.body && !req.is('application/json') && req.headers['content-length'] !== '0')
     return next(new HttpError(415, 'JSON required'));
-  req.user = await readToken(cookies(req).kanz_session);
+  const token = cookies(req).kanz_session;
+  req.user = await readToken(token);
+  if (req.user && tokenExpiry(token) - Date.now() < RENEW_BELOW_MS) // sliding session: renew after a day of activity
+    res.cookie('kanz_session', makeToken(req.user.id), { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: TTL_MS });
   next();
 });
 const need = (perm) => (req, res, next) => {
@@ -57,7 +60,7 @@ app.post('/api/auth/login', async (req, res) => {
     throw new HttpError(401, 'Wrong username or password');
   }
   attempts.delete(key);
-  res.cookie('kanz_session', makeToken(u.id), { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: 12 * 3600 * 1000 });
+  res.cookie('kanz_session', makeToken(u.id), { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: TTL_MS });
   await audit(u, 'login', 'user', u.id);
   res.json({ id: u.id, name: u.name, username: u.username, role: u.role });
 });
@@ -89,7 +92,7 @@ app.post('/api/auth/setup', async (req, res) => {
     return Number(r.lastInsertRowid);
   });
   const u = { id: userId, name, username, role: 'owner' };
-  res.cookie('kanz_session', makeToken(userId), { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: 12 * 3600 * 1000 });
+  res.cookie('kanz_session', makeToken(userId), { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: TTL_MS });
   await audit(u, 'login', 'user', userId, 'first-time setup');
   res.status(201).json(u);
 });

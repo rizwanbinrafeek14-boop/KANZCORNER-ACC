@@ -12,11 +12,20 @@ export function verifyPassword(pw, stored) {
   return hash.length === test.length && timingSafeEqual(hash, test);
 }
 
-if (!getSetting('session_secret')) await setSetting('session_secret', randomBytes(32).toString('hex'));
-const secret = () => getSetting('session_secret');
+// One signing secret shared by every server instance: from KANZ_SESSION_SECRET, or stored once in the database
+// (insert-if-missing then read back, so two instances starting together cannot end up with different secrets).
+let SECRET = process.env.KANZ_SESSION_SECRET;
+if (!SECRET) {
+  await db.prepare("INSERT INTO settings(key,value) VALUES('session_secret', ?) ON CONFLICT (key) DO NOTHING").run(randomBytes(32).toString('hex'));
+  SECRET = (await db.prepare("SELECT value FROM settings WHERE key='session_secret'").get()).value;
+}
+const secret = () => SECRET;
 const sign = (payload) => createHmac('sha256', secret()).update(payload).digest('base64url');
 
-const TTL_MS = 12 * 3600 * 1000;
+// Sessions last 14 days and are renewed while you keep using the app (see the API middleware).
+export const TTL_MS = 14 * 24 * 3600 * 1000;
+export const RENEW_BELOW_MS = 13 * 24 * 3600 * 1000;
+export const tokenExpiry = (token) => Number(String(token).split('.')[1]) || 0;
 export function makeToken(userId) {
   const payload = `${userId}.${Date.now() + TTL_MS}`;
   return `${payload}.${sign(payload)}`;

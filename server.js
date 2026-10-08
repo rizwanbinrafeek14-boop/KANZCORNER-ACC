@@ -30,6 +30,8 @@ function explain(e) {
 }
 
 try {
+  if (process.env.VERCEL && !process.env.DATABASE_URL)
+    throw new Error('DATABASE_URL is not set. On Vercel the app needs your Supabase database address, otherwise nothing you enter would be saved and you would keep getting logged out.\n\nVercel → Settings → Environment Variables → add DATABASE_URL (Supabase Session pooler string), then Redeploy.');
   const { db } = await import('./server/db.js');
   const { importExcel } = await import('./server/seed.js');
   const { app } = await import('./server/index.js');
