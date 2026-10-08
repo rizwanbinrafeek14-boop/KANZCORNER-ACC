@@ -13,7 +13,7 @@ npm start                                                       # http://localho
 npm test
 ```
 
-Needs Node 22.13+.
+Needs Node 18.18+ (Node 22 recommended).
 
 ## Database
 * **Hosted Postgres (Supabase, recommended for going live):** set `DATABASE_URL` to your connection string. Tables are created
