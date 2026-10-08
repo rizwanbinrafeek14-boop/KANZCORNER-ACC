@@ -38,7 +38,7 @@ try {
   if ((await db.prepare('SELECT COUNT(*) c FROM users').get()).c === 0) {
     const out = await importExcel();
     console.log('First start: imported Excel data', out.counts);
-    if (out.password) console.log(`OWNER LOGIN -> username: owner  password: ${out.password}  (set KANZ_ADMIN_PASSWORD to choose your own)`);
+    console.log('Open the site: the first screen lets you create your admin account.');
   }
 
   // If KANZ_ADMIN_USERNAME + KANZ_ADMIN_PASSWORD are set, make sure that owner login exists with that password
@@ -49,6 +49,8 @@ try {
     const row = await db.prepare('SELECT id FROM users WHERE lower(username) = lower(?)').get(adminUser);
     if (row) await db.prepare("UPDATE users SET pass_hash=?, role='owner', active=1 WHERE id=?").run(hash, row.id);
     else await db.prepare("INSERT INTO users(name,username,pass_hash,role) VALUES(?,?,?, 'owner')").run(adminUser, adminUser, hash);
+    const { claimOnce } = await import('./server/db.js');
+    await claimOnce('setup_complete');
     console.log(`Owner login ready for user "${adminUser}"`);
   } else if (process.env.KANZ_ADMIN_USERNAME || adminPass) {
     console.log('KANZ_ADMIN_USERNAME ignored: needs a 3-30 char username (letters, numbers . _ -) and a KANZ_ADMIN_PASSWORD of 8+ characters.');

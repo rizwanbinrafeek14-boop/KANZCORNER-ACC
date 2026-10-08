@@ -161,6 +161,12 @@ export async function setSetting(key, value) {
   await db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, String(value));
   settingsCache.set(key, String(value));
 }
+// Atomically set a flag only if it is not set yet (true = this caller won). Used for one-time first-run setup.
+export async function claimOnce(key) {
+  const row = await db.prepare("INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT (key) DO NOTHING RETURNING key").get(key);
+  if (row) settingsCache.set(key, 'true');
+  return !!row;
+}
 export const allSettings = () => Object.fromEntries([...settingsCache].filter(([k]) => !['session_secret', 'next_invoice'].includes(k)));
 export async function nextInvoiceNumber() {
   const row = await db.prepare("UPDATE settings SET value=((value::int)+1)::text WHERE key='next_invoice' RETURNING value").get();

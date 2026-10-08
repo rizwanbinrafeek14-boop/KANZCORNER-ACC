@@ -1,6 +1,6 @@
 import express from 'express';
 import QRCode from 'qrcode';
-import { db, tx, r2, getSetting, setSetting, allSettings, nextInvoiceNumber, audit, CATEGORIES, MODES, CAT_CUSTOMER_PAYMENT, CAT_SUPPLIER_PAYMENT, CAT_SALES, CAT_PURCHASE } from './db.js';
+import { db, tx, r2, claimOnce, getSetting, setSetting, allSettings, nextInvoiceNumber, audit, CATEGORIES, MODES, CAT_CUSTOMER_PAYMENT, CAT_SUPPLIER_PAYMENT, CAT_SALES, CAT_PURCHASE } from './db.js';
 import { hashPassword, verifyPassword, makeToken, readToken, can } from './auth.js';
 import { cashPosition, customerLedger, supplierLedger, yearReport, dashboard } from './ledger.js';
 
@@ -60,6 +60,38 @@ app.post('/api/auth/login', async (req, res) => {
   res.cookie('kanz_session', makeToken(u.id), { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: 12 * 3600 * 1000 });
   await audit(u, 'login', 'user', u.id);
   res.json({ id: u.id, name: u.name, username: u.username, role: u.role });
+});
+async function setupOpen() {
+  if (getSetting('setup_complete') === 'true') return false;
+  // closed as soon as anybody has ever signed in
+  return (await db.prepare("SELECT COUNT(*) c FROM audit_log WHERE action='login'").get()).c === 0;
+}
+app.get('/api/auth/setup', async (req, res) => res.json({ open: await setupOpen(), needsCode: !!process.env.KANZ_SETUP_CODE }));
+app.post('/api/auth/setup', async (req, res) => {
+  const key = `${req.ip}|setup`;
+  const a = attempts.get(key) ?? { n: 0, until: 0 };
+  if (a.until > Date.now()) throw new HttpError(429, 'Too many attempts. Try again in a few minutes.');
+  if (!(await setupOpen())) throw new HttpError(403, 'Setup is already complete. Please sign in.');
+  const b = req.body ?? {};
+  if (process.env.KANZ_SETUP_CODE && String(b.code ?? '') !== process.env.KANZ_SETUP_CODE) {
+    a.n++; if (a.n >= 5) { a.until = Date.now() + 5 * 60000; a.n = 0; }
+    attempts.set(key, a);
+    throw new HttpError(403, 'Wrong setup code');
+  }
+  const name = str(b.name, 80), username = String(b.username ?? '').trim();
+  if (!name) throw bad('Enter your name');
+  if (!/^[a-z0-9._-]{3,30}$/i.test(username)) throw bad('Username: 3-30 letters or numbers (. _ - allowed)');
+  if (String(b.password ?? '').length < 8) throw bad('Password must be at least 8 characters');
+  const userId = await tx(async () => {
+    if (!(await claimOnce('setup_complete'))) throw new HttpError(403, 'Setup is already complete. Please sign in.');
+    await db.prepare('DELETE FROM users').run(); // remove any placeholder account nobody has used
+    const r = await db.prepare("INSERT INTO users(name,username,pass_hash,role) VALUES(?,?,?, 'owner')").run(name, username, hashPassword(String(b.password)));
+    return Number(r.lastInsertRowid);
+  });
+  const u = { id: userId, name, username, role: 'owner' };
+  res.cookie('kanz_session', makeToken(userId), { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: 12 * 3600 * 1000 });
+  await audit(u, 'login', 'user', userId, 'first-time setup');
+  res.status(201).json(u);
 });
 app.post('/api/auth/logout', async (req, res) => { res.clearCookie('kanz_session'); res.json({ ok: true }); });
 app.get('/api/auth/me', async (req, res) => res.json(req.user ?? null));

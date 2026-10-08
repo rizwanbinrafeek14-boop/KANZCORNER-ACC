@@ -64,19 +64,37 @@ function changePassword() {
     onSubmit: async (v) => { await api('/auth/password', { method: 'POST', body: v }); toast('Password changed'); } });
 }
 
-/* ---------- login ---------- */
-function loginView() {
+/* ---------- login / first-time setup ---------- */
+async function loginView() {
+  let setup = { open: false, needsCode: false };
+  try { setup = await api('/auth/setup'); } catch { /* fall back to plain sign-in */ }
   const err = h('div', { class: 'err hide', role: 'alert' });
-  const form = h('form', { onsubmit: async (e) => {
-    e.preventDefault(); err.classList.add('hide');
-    try {
-      state.user = await api('/auth/login', { method: 'POST', body: Object.fromEntries(new FormData(form)) });
-      state.meta = await api('/meta'); location.hash = '#/dashboard'; route();
-    } catch (ex) { err.textContent = ex.message; err.classList.remove('hide'); }
-  } }, h('h2', null, 'Welcome back'), h('p', { class: 'muted' }, 'Sign in to your accounts'), err,
-  h('label', { class: 'f' }, 'Username', h('input', { name: 'username', required: true, autocomplete: 'username', autofocus: true })),
-  h('label', { class: 'f' }, 'Password', h('input', { name: 'password', type: 'password', required: true, autocomplete: 'current-password' })),
-  h('button', { class: 'btn primary', style: 'justify-content:center;padding:11px' }, 'Sign in'));
+  const fail = (ex) => { err.textContent = ex.message; err.classList.remove('hide'); };
+  const input = (name, label, type = 'text', extra = {}) => h('label', { class: 'f' }, label, h('input', { name, type, required: true, autocomplete: 'off', ...extra }));
+  const enter = async (user) => { state.user = user; state.meta = await api('/meta'); location.hash = '#/dashboard'; route(); };
+  let form;
+  if (setup.open) {
+    form = h('form', { onsubmit: async (e) => {
+      e.preventDefault(); err.classList.add('hide');
+      const v = Object.fromEntries(new FormData(form));
+      if (v.password !== v.confirm) return fail(new Error('The two passwords do not match'));
+      try { await enter(await api('/auth/setup', { method: 'POST', body: v })); toast('Welcome! Your admin account is ready.'); } catch (ex) { fail(ex); }
+    } }, h('h2', null, 'Create your admin account'),
+    h('p', { class: 'muted' }, 'First time here. The account you create now becomes the owner (admin) with full access.'), err,
+    input('name', 'Your name', 'text', { autofocus: true }), input('username', 'Username'), input('password', 'Password (min 8 characters)', 'password', { autocomplete: 'new-password' }),
+    input('confirm', 'Confirm password', 'password', { autocomplete: 'new-password' }),
+    setup.needsCode ? input('code', 'Setup code (from your host settings)') : null,
+    h('button', { class: 'btn primary', style: 'justify-content:center;padding:11px' }, 'Create admin account'));
+  } else {
+    form = h('form', { onsubmit: async (e) => {
+      e.preventDefault(); err.classList.add('hide');
+      try { await enter(await api('/auth/login', { method: 'POST', body: Object.fromEntries(new FormData(form)) })); } catch (ex) { fail(ex); }
+    } }, h('h2', null, 'Welcome back'), h('p', { class: 'muted' }, 'Sign in to your accounts'), err,
+    h('label', { class: 'f' }, 'Username', h('input', { name: 'username', required: true, autocomplete: 'username', autofocus: true })),
+    h('label', { class: 'f' }, 'Password', h('input', { name: 'password', type: 'password', required: true, autocomplete: 'current-password' })),
+    h('button', { class: 'btn primary', style: 'justify-content:center;padding:11px' }, 'Sign in'),
+    h('p', { class: 'muted', style: 'font-size:12.5px' }, 'New staff accounts are created by the admin under Settings & users.'));
+  }
   app.replaceChildren(h('div', { class: 'login' },
     h('div', { class: 'hero' }, h('div', { class: 'brand' }, h('div', { class: 'logo' }, 'K'), h('b', null, 'Kanz Corner Trading')),
       h('div', null, h('h1', null, 'Know your cash, customers and stock — at a glance.'), h('p', null, 'Everything from your Excel cashbook, now with live balances, overdue alerts and real profit per product.')),

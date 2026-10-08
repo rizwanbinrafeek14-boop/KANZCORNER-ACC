@@ -1,6 +1,5 @@
-import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { db, tx, r2, setSetting, audit, CAT_CUSTOMER_PAYMENT, CAT_SALES, CAT_RETURN, CAT_PURCHASE } from './db.js';
+import { db, tx, r2, setSetting, claimOnce, audit, CAT_CUSTOMER_PAYMENT, CAT_SALES, CAT_RETURN, CAT_PURCHASE } from './db.js';
 import { hashPassword } from './auth.js';
 
 const SRC = new URL('../data/excel-export.json', import.meta.url).pathname;
@@ -36,13 +35,14 @@ export async function importExcel({ adminPassword, adminUsername } = {}) {
       vat_rate: '0.15', financial_year: '2026', opening_cash: '0', opening_bank: '0', default_credit_days: '30',
     })) await setSetting(k, v);
 
-    // --- owner account
-    let password = adminPassword || process.env.KANZ_ADMIN_PASSWORD;
-    let generated = false;
-    if (!password) { password = randomBytes(9).toString('base64url'); generated = true; }
-    const owner = (adminUsername || process.env.KANZ_ADMIN_USERNAME || 'owner').trim();
-    await db.prepare("INSERT INTO users(name,username,pass_hash,role) VALUES(?,?,?, 'owner') ON CONFLICT(username) DO NOTHING")
-      .run(owner === 'owner' ? 'Owner' : owner, owner, hashPassword(password));
+    // --- owner account (only when a password is supplied; otherwise the first visitor creates the admin on the setup screen)
+    const password = adminPassword || process.env.KANZ_ADMIN_PASSWORD;
+    if (password) {
+      const owner = (adminUsername || process.env.KANZ_ADMIN_USERNAME || 'owner').trim();
+      await db.prepare("INSERT INTO users(name,username,pass_hash,role) VALUES(?,?,?, 'owner') ON CONFLICT(username) DO NOTHING")
+        .run(owner === 'owner' ? 'Owner' : owner, owner, hashPassword(password));
+      await claimOnce('setup_complete');
+    }
 
     // --- parties
     const custId = new Map(), supId = new Map();
@@ -141,7 +141,7 @@ export async function importExcel({ adminPassword, adminUsername } = {}) {
     if (cashNow < 0) await issueStmt.run('warn', 'Cashbook', 'Cash in hand', `Cash in hand is negative (${r2(cashNow)}): cash payments are larger than cash receipts. Check your opening cash, or whether some "Mada / Card" or bank receipts were really cash (or cash withdrawals from the bank are missing).`);
 
     await audit(null, 'import', 'excel', null, JSON.stringify(n));
-    return { counts: n, password: generated ? password : null };
+    return { counts: n };
   });
 }
 
@@ -152,5 +152,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
   const out = await importExcel();
   console.log('Imported:', out.counts);
-  if (out.password) console.log(`\nOwner login  ->  username: owner   password: ${out.password}\n(Save it now; set KANZ_ADMIN_PASSWORD before seeding to choose your own.)`);
+  console.log('\nNow run `npm start` and open the site: the first screen lets you create your admin account.');
 }

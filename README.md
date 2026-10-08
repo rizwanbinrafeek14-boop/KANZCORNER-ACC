@@ -8,12 +8,17 @@ ZATCA-style QR), purchases, cashbook, VAT / P&L / ageing reports, users and role
 
 ```bash
 npm install
-KANZ_ADMIN_PASSWORD='choose-a-strong-password' npm run seed   # one-time: creates data/kanz.db from your Excel data
-npm start                                                       # http://localhost:3000   (user: owner)
+npm start        # http://localhost:3000 – first start imports your Excel data
 npm test
 ```
 
 Needs Node 18.18+ (Node 22 recommended).
+
+## First sign-in
+Open the site. The **first screen asks you to create the admin account** (name, username, password) – that user becomes the
+owner. After that the screen never appears again; the owner adds staff under *Settings & users*.
+To stop a stranger grabbing the admin account before you do, set `KANZ_SETUP_CODE` on the host first – the setup screen then
+asks for that code. (Alternative: set `KANZ_ADMIN_USERNAME` + `KANZ_ADMIN_PASSWORD` and skip the screen.)
 
 ## Database
 * **Hosted Postgres (Supabase, recommended for going live):** set `DATABASE_URL` to your connection string. Tables are created
@@ -31,7 +36,8 @@ Needs Node 18.18+ (Node 22 recommended).
 | Variable | Meaning |
 |---|---|
 | `DATABASE_URL` | Supabase connection string |
-| `KANZ_ADMIN_USERNAME` / `KANZ_ADMIN_PASSWORD` | Your owner login (created/reset at every start) |
+| `KANZ_SETUP_CODE` | Optional: code required on the first-time setup screen |
+| `KANZ_ADMIN_USERNAME` / `KANZ_ADMIN_PASSWORD` | Optional: create/reset the owner at every start (skips the setup screen) |
 | `DATABASE_SSL` | `false` only for a local non-SSL Postgres |
 | `DATABASE_POOL_MAX` | Max connections (default 5) |
 
